@@ -7,12 +7,12 @@ package org.scalaexercises.client
 package utils
 
 import org.scalajs.dom.ext.KeyCode
+
 import scala.scalajs.js
 import org.scalajs.dom
-import org.scalajs.dom.raw.{ HTMLDivElement, HTMLElement, HTMLInputElement }
-import org.scalajs.jquery.{ jQuery ⇒ $, JQuery }
+import org.scalajs.dom.raw.{ HTMLDivElement, HTMLElement, HTMLInputElement, HTMLTextAreaElement }
+import org.scalajs.jquery.{ JQuery, jQuery ⇒ $ }
 import fp.IO
-
 import cats.data.OptionT
 import cats.std.list._
 import cats.std.option._
@@ -71,6 +71,8 @@ object DomHandler {
   ): IO[Unit] = for {
     inputs ← allInputs
     _ ← inputs.map(input ⇒ attachKeyUpHandler(input, onkeyup, onEnterPressed)).sequence
+    textareas ← allTextAreas
+    _ ← textareas.map(textarea ⇒ attachKeyUpHandlerToTextArea(textarea, onkeyup)).sequence
   } yield ()
 
   /** Shows modal for signing up
@@ -96,6 +98,24 @@ object DomHandler {
     })
   }
 
+  def attachKeyUpHandlerToTextArea(
+    input:   HTMLTextAreaElement,
+    onkeyup: (String, Seq[String]) ⇒ IO[Unit]
+  ): IO[Unit] = io {
+    $(input).keyup((e: dom.KeyboardEvent) ⇒ {
+      (for {
+        //        _ ← OptionT(setInputWidth(input) map (_.some))
+        methodName ← OptionT(io(methodParent(input)))
+        exercise ← OptionT(io(findExerciseByMethod(methodName)))
+        inputsValues = getInputsValues(exercise)
+        _ ← OptionT((e.keyCode match {
+          case KeyCode.Enter ⇒ io {} // discard enters
+          case _             ⇒ onkeyup(methodName, inputsValues)
+        }).map(_.some))
+      } yield ()).value.unsafePerformIO()
+    })
+  }
+
   def onButtonClick(onClick: String ⇒ IO[Unit]): IO[Unit] =
     allExercises.map(attachClickHandler(_, onClick)).sequence.map(_ ⇒ ())
 
@@ -111,8 +131,6 @@ object DomHandler {
   def inputReplacements: IO[Seq[(HTMLElement, String)]] = for {
     blocks ← getCodeBlocks
   } yield blocks.map(code ⇒ code → replaceInputByRes(getTextInCode(code)))
-
-  val resAssert = """(?s)(res\d+)""".r
 
   def allExercises: List[HTMLDivElement] = {
     ($(".exercise").divs filter isMethodDefined).toList
@@ -135,9 +153,11 @@ object DomHandler {
 
   def methodName(e: HTMLElement): Option[String] = Option(getMethodAttr(e)) filter (_.nonEmpty)
 
-  def methodParent(input: HTMLInputElement): Option[String] = methodName($(input).closest(".exercise").getDiv)
+  def methodParent(input: HTMLElement): Option[String] = methodName($(input).closest(".exercise").getDiv)
 
   def allInputs: IO[List[HTMLInputElement]] = io { $(".exercise-code>input").inputs.toList }
+
+  def allTextAreas: IO[List[HTMLTextAreaElement]] = io { $(".exercise-code>textarea").textareas.toList }
 
   def inputs(el: HTMLElement): List[HTMLInputElement] = $(el).find("input").inputs.toList
 
@@ -157,7 +177,15 @@ object DomHandler {
 
   def getTextInCode(code: HTMLElement): String = $(code).text
 
-  def replaceInputByRes(text: String): String = resAssert.replaceAllIn(text, """<input type="text" data-res="$1"/>""")
+  val resAssert = """(?s)(res\d+)""".r
+  val resSizeAssert = """(?s)res(\d+)s(\d+)""".r
+  val resLineAssert = """(?s)res(\d+)l(\d+)""".r
+
+  def replaceInputByRes(text: String): String = {
+    val result1 = resSizeAssert.replaceAllIn(text, """<input type="text" data-res="$1" size="$2"/>""")
+    val result2 = resLineAssert.replaceAllIn(result1, """<textarea data-res="$1" rows="$2" cols="50"/>""")
+    resAssert.replaceAllIn(result2, """<input type="text" data-res="$1"/>""")
+  }
 
   def getInputLength(input: HTMLInputElement): Int = $(input).value.toString.length
 
@@ -180,6 +208,8 @@ object DomHandler {
     def divs: Seq[HTMLDivElement] = all[HTMLDivElement]
 
     def inputs: Seq[HTMLInputElement] = all[HTMLInputElement]
+
+    def textareas: Seq[HTMLTextAreaElement] = all[HTMLTextAreaElement]
 
     def getDiv: HTMLDivElement = get[HTMLDivElement]
 
