@@ -78,9 +78,8 @@ object UI {
   def copyArgumentsToInputs(e: ClientExercise, element: HTMLElement): IO[Unit] = {
     val theInputs = inputs(element)
     val args = e.arguments
-    args.zip(theInputs).map({ argAndInput ⇒
-      val (arg, input) = argAndInput
-      setInputValue(input, arg)
+    args.zip(theInputs).map({
+      case (arg, input) ⇒ input.setInputValue(arg)
     }).toList.sequence.map(_ ⇒ ())
   }
 

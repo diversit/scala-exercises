@@ -19,9 +19,125 @@ import cats.std.option._
 import cats.syntax.option._
 import cats.syntax.traverse._
 
+import scala.reflect.ClassTag
+
 object DomHandler {
 
   import IO._
+
+  sealed trait ExerciseElement {
+    def setInputValue(value: String): IO[Unit]
+
+    def value: String
+
+    def attachKeyUpHandler(
+      onkeyup:        (String, Seq[String]) ⇒ IO[Unit],
+      onEnterPressed: String ⇒ IO[Unit]
+    ): IO[Unit]
+
+    protected def methodParent(input: HTMLElement): Option[String] = methodName($(input).closest(".exercise").getDiv)
+  }
+
+  trait ExerciseELementCompanion {
+    /** @return All available [[ExerciseElement]]s.
+      */
+    def allElements: IO[List[ExerciseElement]]
+
+    /** @param el Html element
+      * @return All [[ExerciseElement]] under given html element.
+      */
+    def inputs(el: HTMLElement): List[ExerciseElement]
+
+    // TODO What's different with 'inputs' function?
+    def inputsInExercise(exercise: HTMLElement): Seq[ExerciseElement]
+  }
+
+  object TextInputExerciseElement extends ExerciseELementCompanion {
+    override def allElements: IO[List[ExerciseElement]] = io { $(".exercise-code>input").inputs.map(_.asExerciseElement).toList }
+
+    override def inputs(el: HTMLElement): List[ExerciseElement] = $(el).find("input").inputs.map(_.asExerciseElement).toList
+
+    override def inputsInExercise(exercise: HTMLElement): Seq[ExerciseElement] = $(exercise).find("input").inputs.map(_.asExerciseElement)
+
+    implicit class HtmlInputElementToExerciseELement(val elem: HTMLInputElement) extends AnyVal {
+      def asExerciseElement: ExerciseElement = TextInputExerciseElement(elem)
+    }
+  }
+
+  case class TextInputExerciseElement(elem: HTMLInputElement) extends ExerciseElement {
+
+    override def setInputValue(value: String): IO[Unit] = for {
+      _ ← io { $(elem) `val` (value) }
+      _ ← setInputWidth(elem)
+    } yield ()
+
+    override def value: String = elem.value
+
+    override def attachKeyUpHandler(
+      onkeyup:        (String, Seq[String]) ⇒ IO[Unit],
+      onEnterPressed: String ⇒ IO[Unit]
+    ): IO[Unit] = io {
+      $(elem).keyup((e: dom.KeyboardEvent) ⇒ {
+        (for {
+          _ ← OptionT(setInputWidth(elem) map (_.some))
+          methodName ← OptionT(io(methodParent(elem)))
+          exercise ← OptionT(io(findExerciseByMethod(methodName)))
+          inputsValues = getInputsValues(exercise)
+          _ ← OptionT((e.keyCode match {
+            case KeyCode.Enter ⇒ onEnterPressed(methodName)
+            case _             ⇒ onkeyup(methodName, inputsValues)
+          }).map(_.some))
+        } yield ()).value.unsafePerformIO()
+      })
+    }
+
+    private def getInputsValues(exercise: HTMLElement): Seq[String] = inputsInExercise(exercise).map(_.value)
+
+    private def inputsInExercise(exercise: HTMLElement): Seq[ExerciseElement] = TextInputExerciseElement.inputsInExercise(exercise)
+
+  }
+
+  object TextareaExerciseElement extends ExerciseELementCompanion {
+    override def allElements: IO[List[ExerciseElement]] = io { $(".exercise-code>textarea").textareas.map(_.asExerciseElement).toList }
+
+    override def inputs(el: HTMLElement): List[ExerciseElement] = $(el).find("textarea").textareas.map(_.asExerciseElement).toList
+
+    override def inputsInExercise(exercise: HTMLElement): Seq[ExerciseElement] = $(exercise).find("textarea").textareas.map(_.asExerciseElement)
+
+    implicit class HTMLTextAreaElementToExerciseELement(val elem: HTMLTextAreaElement) extends AnyVal {
+      def asExerciseElement: ExerciseElement = TextareaExerciseElement(elem)
+    }
+  }
+
+  case class TextareaExerciseElement(elem: HTMLTextAreaElement) extends ExerciseElement {
+    override def setInputValue(value: String): IO[Unit] = for {
+      _ ← io { $(elem) text (value) }
+    } yield ()
+
+    override def value: String = elem.value
+
+    override def attachKeyUpHandler(onkeyup: (String, Seq[String]) ⇒ IO[Unit], onEnterPressed: (String) ⇒ IO[Unit]): IO[Unit] = io {
+      $(elem).keyup((e: dom.KeyboardEvent) ⇒ {
+        (for {
+          methodName ← OptionT(io(methodParent(elem)))
+          exercise ← OptionT(io(findExerciseByMethod(methodName)))
+          inputValues = getInputsValues(exercise)
+          _ ← OptionT((e.keyCode match {
+            case KeyCode.Enter ⇒ io() // do nothing since 'Enter' is needed in textarea to go to next line
+            case KeyCode.Ctrl  ⇒ io { println("CTRL detected") } // TODO remove
+            case _             ⇒ onkeyup(methodName, inputValues)
+          }).map(_.some))
+        } yield ()).value.unsafePerformIO()
+      })
+    }
+
+    // TODO in super
+    private def getInputsValues(exercise: HTMLElement): Seq[String] = inputsInExercise(exercise).map(_.value)
+
+    // TODO move from companion to here since no where other used
+    private def inputsInExercise(exercise: HTMLElement): Seq[ExerciseElement] = TextareaExerciseElement.inputsInExercise(exercise)
+
+  }
 
   /** Replaces text matched into html inputs
     */
@@ -70,51 +186,12 @@ object DomHandler {
     onEnterPressed: String ⇒ IO[Unit]
   ): IO[Unit] = for {
     inputs ← allInputs
-    _ ← inputs.map(input ⇒ attachKeyUpHandler(input, onkeyup, onEnterPressed)).sequence
-    textareas ← allTextAreas
-    _ ← textareas.map(textarea ⇒ attachKeyUpHandlerToTextArea(textarea, onkeyup)).sequence
+    _ ← inputs.map(input ⇒ input.attachKeyUpHandler(onkeyup, onEnterPressed)).sequence
   } yield ()
 
   /** Shows modal for signing up
     */
   def showSignUpModal: IO[Unit] = io($("#mustSignUp").modal("show"))
-
-  def attachKeyUpHandler(
-    input:          HTMLInputElement,
-    onkeyup:        (String, Seq[String]) ⇒ IO[Unit],
-    onEnterPressed: String ⇒ IO[Unit]
-  ): IO[Unit] = io {
-    $(input).keyup((e: dom.KeyboardEvent) ⇒ {
-      (for {
-        _ ← OptionT(setInputWidth(input) map (_.some))
-        methodName ← OptionT(io(methodParent(input)))
-        exercise ← OptionT(io(findExerciseByMethod(methodName)))
-        inputsValues = getInputsValues(exercise)
-        _ ← OptionT((e.keyCode match {
-          case KeyCode.Enter ⇒ onEnterPressed(methodName)
-          case _             ⇒ onkeyup(methodName, inputsValues)
-        }).map(_.some))
-      } yield ()).value.unsafePerformIO()
-    })
-  }
-
-  def attachKeyUpHandlerToTextArea(
-    input:   HTMLTextAreaElement,
-    onkeyup: (String, Seq[String]) ⇒ IO[Unit]
-  ): IO[Unit] = io {
-    $(input).keyup((e: dom.KeyboardEvent) ⇒ {
-      (for {
-        //        _ ← OptionT(setInputWidth(input) map (_.some))
-        methodName ← OptionT(io(methodParent(input)))
-        exercise ← OptionT(io(findExerciseByMethod(methodName)))
-        inputsValues = getInputsValues(exercise)
-        _ ← OptionT((e.keyCode match {
-          case KeyCode.Enter ⇒ io {} // discard enters
-          case _             ⇒ onkeyup(methodName, inputsValues)
-        }).map(_.some))
-      } yield ()).value.unsafePerformIO()
-    })
-  }
 
   def onButtonClick(onClick: String ⇒ IO[Unit]): IO[Unit] =
     allExercises.map(attachClickHandler(_, onClick)).sequence.map(_ ⇒ ())
@@ -153,13 +230,12 @@ object DomHandler {
 
   def methodName(e: HTMLElement): Option[String] = Option(getMethodAttr(e)) filter (_.nonEmpty)
 
-  def methodParent(input: HTMLElement): Option[String] = methodName($(input).closest(".exercise").getDiv)
+  def allInputs: IO[List[ExerciseElement]] = {
+    import cats.implicits._
+    TextInputExerciseElement.allElements |@| TextareaExerciseElement.allElements map (_ ++ _)
+  }
 
-  def allInputs: IO[List[HTMLInputElement]] = io { $(".exercise-code>input").inputs.toList }
-
-  def allTextAreas: IO[List[HTMLTextAreaElement]] = io { $(".exercise-code>textarea").textareas.toList }
-
-  def inputs(el: HTMLElement): List[HTMLInputElement] = $(el).find("input").inputs.toList
+  def inputs(el: HTMLElement): List[ExerciseElement] = TextInputExerciseElement.inputs(el) ++ TextareaExerciseElement.inputs(el)
 
   def findExerciseByMethod(method: String): Option[HTMLElement] = {
     allExercises.find(methodName(_) == Option(method))
@@ -168,10 +244,6 @@ object DomHandler {
   def findExerciseCode(el: HTMLElement): Option[HTMLElement] = {
     $(el).find(".exercise-pre").all.headOption
   }
-
-  def getInputsValues(exercise: HTMLElement): Seq[String] = inputsInExercise(exercise).map(_.value)
-
-  def inputsInExercise(exercise: HTMLElement): Seq[HTMLInputElement] = $(exercise).find("input").inputs
 
   def getCodeBlocks: IO[Seq[HTMLElement]] = io { $("code.exercise-code").elements }
 
@@ -183,18 +255,13 @@ object DomHandler {
 
   def replaceInputByRes(text: String): String = {
     val result1 = resSizeAssert.replaceAllIn(text, """<input type="text" data-res="$1" size="$2"/>""")
-    val result2 = resLineAssert.replaceAllIn(result1, """<textarea data-res="$1" rows="$2" cols="50"/>""")
+    val result2 = resLineAssert.replaceAllIn(result1, """<textarea data-res="$1" rows="$2" cols="100"/>""")
     resAssert.replaceAllIn(result2, """<input type="text" data-res="$1"/>""")
   }
 
   def getInputLength(input: HTMLInputElement): Int = $(input).value.toString.length
 
   def isLogged: Boolean = $("#loggedUser").length > 0
-
-  def setInputValue(input: HTMLInputElement, v: String): IO[Unit] = for {
-    _ ← io { $(input) `val` (v) }
-    _ ← setInputWidth(input)
-  } yield ()
 
   def inputSize(length: Int): Double = length match {
     case 0 ⇒ 12d
@@ -213,7 +280,7 @@ object DomHandler {
 
     def getDiv: HTMLDivElement = get[HTMLDivElement]
 
-    def all[A <: dom.Element]: Seq[A] = j.toArray().collect { case d: A ⇒ d }
+    def all[A <: dom.Element: ClassTag]: Seq[A] = j.toArray().collect { case d: A ⇒ d }
 
     def get[A <: dom.Element]: A = j.get().asInstanceOf[A]
 
